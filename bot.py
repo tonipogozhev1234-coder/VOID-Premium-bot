@@ -386,6 +386,7 @@ async def cmd_start(message: types.Message, command: CommandObject):
         f"/mycode — показать код\n"
         f"/newcode — перегенерировать код\n"
         f"/what — что входит в Premium\n"
+        f"/myid — твой Telegram ID\n"
         f"/help — помощь",
         parse_mode="HTML",
     )
@@ -589,8 +590,11 @@ async def _grant_free_premium(
     target_id: int,
     days: int,
     target_username: str = "",
-) -> tuple[str, datetime]:
-    """Выдать Premium бесплатно: код + сайт + локальное хранилище."""
+) -> tuple[str, datetime, str]:
+    """Выдать Premium бесплатно: код + сайт + локальное хранилище.
+    Возвращает (code, expiry, site_warning). Код выдаётся даже если сайт упал.
+    """
+    site_warning = ""
     existing = vip_users.get(target_id)
     if existing and existing.get("code") and existing["expiry"] > datetime.now() and not existing.get("frozen"):
         vip_code = existing["code"]
@@ -602,12 +606,20 @@ async def _grant_free_premium(
                 expiry = datetime.fromtimestamp(result["expiry"] / 1000)
         except RuntimeError as err:
             logger.warning("gift extend failed, re-register: %s", err)
-            await register_code_on_site(target_id, vip_code, target_username, days=days)
-            expiry = datetime.now() + timedelta(days=days)
+            try:
+                await register_code_on_site(target_id, vip_code, target_username, days=days)
+                expiry = datetime.now() + timedelta(days=days)
+            except RuntimeError as reg_err:
+                site_warning = str(reg_err)
+                expiry = datetime.now() + timedelta(days=days)
     else:
         vip_code = generate_unique_code()
         expiry = datetime.now() + timedelta(days=days)
-        await register_code_on_site(target_id, vip_code, target_username, days=days)
+        try:
+            await register_code_on_site(target_id, vip_code, target_username, days=days)
+        except RuntimeError as err:
+            site_warning = str(err)
+            logger.warning("gift register on site failed (local OK): %s", err)
 
     vip_users[target_id] = {
         "expiry": expiry,
@@ -616,7 +628,23 @@ async def _grant_free_premium(
         "username": target_username or vip_users.get(target_id, {}).get("username", ""),
     }
     save_data()
-    return vip_code, expiry
+    return vip_code, expiry, site_warning
+
+
+@dp.message(Command("myid", "id"))
+async def cmd_myid(message: types.Message):
+    """Показать свой Telegram ID (нужен для ADMIN_ID на Bothost)."""
+    uid = message.from_user.id
+    uname = message.from_user.username or "—"
+    is_admin = ADMIN_ID > 0 and uid == ADMIN_ID
+    await message.answer(
+        f"🆔 <b>Твой Telegram ID:</b> <code>{uid}</code>\n"
+        f"Username: @{uname}\n"
+        f"Админ-режим: {'✅ да' if is_admin else '❌ нет'}\n\n"
+        f"Вставь этот ID в Bothost → переменная <code>ADMIN_ID</code>, "
+        f"потом Redeploy. После этого: <code>/{GIFT_SECRET_CMD}</code>",
+        parse_mode="HTML",
+    )
 
 
 @dp.message(Command(GIFT_SECRET_CMD, "voidgift", "freegift"))
@@ -630,12 +658,26 @@ async def cmd_secret_gift(message: types.Message):
     /voidgift 123456789 90 → юзеру на 90 дней
     /voidgift me 60        → себе на 60 дней
     """
+    uid = message.from_user.id
+
+    if ADMIN_ID <= 0:
+        await message.answer(
+            "⚠️ <b>ADMIN_ID не задан</b> на Bothost.\n\n"
+            f"1. Напиши /myid — скопируй ID\n"
+            f"2. Bothost → Переменные: <code>ADMIN_ID</code> = твой ID\n"
+            f"3. Redeploy бота\n"
+            f"4. Снова <code>/{GIFT_SECRET_CMD}</code>",
+            parse_mode="HTML",
+        )
+        return
+
     # Молча игнорим чужих — чтобы команда не светилась
-    if message.from_user.id != ADMIN_ID or ADMIN_ID <= 0:
+    if uid != ADMIN_ID:
+        logger.info("gift denied: user=%s admin=%s", uid, ADMIN_ID)
         return
 
     parts = (message.text or "").split()
-    target_id = message.from_user.id
+    target_id = uid
     target_username = message.from_user.username or ""
     days = SUBSCRIPTION_DAYS
 
@@ -643,7 +685,7 @@ async def cmd_secret_gift(message: types.Message):
     if len(parts) >= 2:
         arg1 = parts[1].strip().lower()
         if arg1 in ("me", "self", "я"):
-            target_id = message.from_user.id
+            target_id = uid
             target_username = message.from_user.username or ""
         else:
             try:
@@ -676,20 +718,32 @@ async def cmd_secret_gift(message: types.Message):
         except Exception:
             pass
 
-        vip_code, expiry = await _grant_free_premium(target_id, days, target_username)
+        vip_code, expiry, site_warning = await _grant_free_premium(
+            target_id, days, target_username
+        )
 
-        await message.answer(
+        site_note = ""
+        if site_warning:
+            site_note = (
+                f"\n\n⚠️ Сайт не принял код: {site_warning}\n"
+                f"Локально Premium активен; проверь BOT_API_SECRET."
+            )
+
+        await bot.send_message(
+            uid,
             f"🎁 <b>БЕСПЛАТНЫЙ Premium выдан</b>\n\n"
             f"👤 TG ID: <code>{target_id}</code>\n"
             f"🔑 Код: <code>{vip_code}</code>\n"
             f"📅 До: {format_expiry(expiry)}\n"
             f"⏱ {days} дн.\n\n"
-            f"Ввод на сайте: Настройки → VOID Premium",
+            f"Проверка: /vip | /mycode\n"
+            f"Сайт: Настройки → VOID Premium"
+            f"{site_note}",
             parse_mode="HTML",
         )
 
         # Уведомить получателя, если это не админ
-        if target_id != message.from_user.id:
+        if target_id != uid:
             try:
                 await bot.send_message(
                     target_id,
@@ -703,7 +757,8 @@ async def cmd_secret_gift(message: types.Message):
                     parse_mode="HTML",
                 )
             except Exception as send_err:
-                await message.answer(
+                await bot.send_message(
+                    uid,
                     f"⚠️ Код создан, но не удалось написать юзеру:\n{send_err}\n"
                     f"Передай код вручную: <code>{vip_code}</code>",
                     parse_mode="HTML",
@@ -711,13 +766,14 @@ async def cmd_secret_gift(message: types.Message):
 
         logger.info(
             "FREE GIFT: admin=%s → user=%s code=%s days=%s",
-            message.from_user.id,
+            uid,
             target_id,
             vip_code,
             days,
         )
-    except RuntimeError as err:
-        await message.answer(f"❌ Не удалось выдать Premium:\n{err}")
+    except Exception as err:
+        logger.exception("gift failed")
+        await bot.send_message(uid, f"❌ Не удалось выдать Premium:\n{err}")
 
 
 @dp.message(Command("freeze"))
@@ -912,6 +968,10 @@ async def success_payment(message: types.Message):
 
 @dp.message()
 async def any_message(message: types.Message):
+    text = (message.text or "").strip()
+    # Команды (/voidgift, неизвестные и т.д.) — не отвечать «Нужен Premium»
+    if text.startswith("/"):
+        return
     user_id = message.from_user.id
     if is_vip_active(user_id):
         code = vip_users[user_id]["code"]
@@ -986,6 +1046,7 @@ async def main():
     me = await bot.get_me()
     bot_username = me.username or ""
     logger.info("Бот: @%s (id=%s)", bot_username, me.id)
+    logger.info("ADMIN_ID=%s | gift=/%s", ADMIN_ID, GIFT_SECRET_CMD)
     logger.info("Premium: %s Stars / %s дн. | коды: %s симв.", VIP_PRICE_STARS, SUBSCRIPTION_DAYS, CODE_LENGTH)
     logger.info("SITE_API_URL=%s", SITE_API_URL)
     logger.info("DATA_FILE=%s", DATA_FILE)

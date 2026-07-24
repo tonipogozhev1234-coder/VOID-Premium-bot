@@ -1,0 +1,23 @@
+[Unit]
+Description=VOID Telegram Bot (Premium + login codes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voidbot
+Group=voidbot
+WorkingDirectory=/opt/void-bot
+EnvironmentFile=/opt/void-bot/.env
+ExecStart=/opt/void-bot/.venv/bin/python /opt/void-bot/bot.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=void-bot
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

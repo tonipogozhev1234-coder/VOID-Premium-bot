@@ -1,0 +1,15 @@
+services:
+  void-bot:
+    build: .
+    container_name: void-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      VIP_PRICE_STARS: ${VIP_PRICE_STARS:-100}
+      DATA_FILE: /app/data/vip_data.json
+    volumes:
+      - void-bot-data:/app/data
+
+volumes:
+  void-bot-data:

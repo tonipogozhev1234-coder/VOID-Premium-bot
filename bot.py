@@ -202,24 +202,106 @@ def format_expiry(expiry: datetime) -> str:
     return expiry.strftime("%d.%m.%Y %H:%M")
 
 
+def _site_urls(path: str) -> list[str]:
+    """Несколько URL: на reg.ru /api/* иногда отдаёт HTML, /api.php?__void_path= — fallback."""
+    base = SITE_API_URL.rstrip("/")
+    p = path.lstrip("/")
+    urls = [f"{base}/{p}"]
+    if base.endswith("/api"):
+        root = base[: -len("/api")] or base
+        urls.append(f"{root}/api.php?__void_path={p}")
+    out: list[str] = []
+    for u in urls:
+        if u not in out:
+            out.append(u)
+    return out
+
+
 async def site_post(path: str, **payload) -> dict:
-    """POST к API сайта с X-Bot-Secret (или без секрета для публичных — не используем)."""
-    url = f"{SITE_API_URL.rstrip('/')}/{path.lstrip('/')}"
+    """POST к API сайта с X-Bot-Secret. Если первый URL отдал HTML — пробует fallback."""
     headers = {
         "Content-Type": "application/json",
         "X-Bot-Secret": BOT_API_SECRET,
+        "Accept": "application/json",
     }
+    last_err: Exception | None = None
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=15) as resp:
-                data = await resp.json(content_type=None)
-                if not isinstance(data, dict):
-                    data = {"error": str(data)}
-                if resp.status >= 400:
-                    raise RuntimeError(data.get("error", f"HTTP {resp.status}"))
-                return data
-    except aiohttp.ClientError as err:
-        raise RuntimeError(f"Сайт недоступен: {err}") from err
+            for url in _site_urls(path):
+                try:
+                    async with session.post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=20),
+                    ) as resp:
+                        text = await resp.text()
+                        low = text.lower()
+                        if "<!doctype" in low or "<html" in low:
+                            last_err = RuntimeError(
+                                f"Сайт отдал HTML вместо API ({url}). "
+                                "Залей api/ + .htaccess + api.php на public_html."
+                            )
+                            continue
+                        try:
+                            data = json.loads(text) if text else {}
+                        except json.JSONDecodeError:
+                            last_err = RuntimeError(f"Не JSON от {url}: {text[:120]!r}")
+                            continue
+                        if not isinstance(data, dict):
+                            data = {"error": str(data)}
+                        if resp.status >= 400:
+                            err_msg = str(data.get("error", f"HTTP {resp.status}"))
+                            # секрет/доступ — не долбим fallback как «HTML»
+                            if resp.status in (401, 403) and "html" not in err_msg.lower():
+                                raise RuntimeError(err_msg)
+                            last_err = RuntimeError(err_msg)
+                            if resp.status in (401, 403):
+                                raise last_err
+                            continue
+                        return data
+                except RuntimeError as err:
+                    last_err = err
+                    msg = str(err).lower()
+                    if "секрет" in msg or "secret" in msg or "401" in msg or "403" in msg:
+                        if "html" not in msg:
+                            raise
+                except aiohttp.ClientError as err:
+                    last_err = RuntimeError(f"Сайт недоступен ({url}): {err}")
+    except RuntimeError:
+        raise
+    except Exception as err:
+        last_err = err
+    raise RuntimeError(str(last_err) if last_err else "Сайт недоступен")
+
+
+async def site_get(path: str) -> dict:
+    """GET к API (bot/ping, health)."""
+    headers = {
+        "X-Bot-Secret": BOT_API_SECRET,
+        "Accept": "application/json",
+    }
+    last_err: Exception | None = None
+    async with aiohttp.ClientSession() as session:
+        for url in _site_urls(path):
+            try:
+                async with session.get(
+                    url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
+                    text = await resp.text()
+                    low = text.lower()
+                    if "<!doctype" in low or "<html" in low:
+                        last_err = RuntimeError(f"HTML вместо API: {url}")
+                        continue
+                    data = json.loads(text) if text else {}
+                    if not isinstance(data, dict):
+                        data = {"raw": data}
+                    if resp.status >= 400:
+                        raise RuntimeError(data.get("error", f"HTTP {resp.status}"))
+                    return data
+            except Exception as err:
+                last_err = err
+    raise RuntimeError(str(last_err) if last_err else "GET failed")
 
 
 async def site_api(action: str, **payload) -> dict:
@@ -1051,6 +1133,20 @@ async def main():
     logger.info("SITE_API_URL=%s", SITE_API_URL)
     logger.info("DATA_FILE=%s", DATA_FILE)
     logger.info("В api/config.php: TELEGRAM_BOT_USERNAME = '%s'", bot_username)
+    # Проверка сайт↔бот (секрет + JSON)
+    try:
+        ping = await site_get("bot/ping")
+        logger.info(
+            "Сайт API OK: botAuth=%s codesCount=%s",
+            ping.get("botAuth"),
+            ping.get("codesCount"),
+        )
+    except Exception as ping_err:
+        logger.error(
+            "Сайт API НЕДОСТУПЕН: %s | Bothost env: BOT_API_SECRET + SITE_API_URL=https://webvoid.ru/api | "
+            "На сайте: api/secrets.local.php и залитая папка api/",
+            ping_err,
+        )
     try:
         await sync_local_codes_to_site()
         logger.info("Синхронизация VIP-кодов с сайтом: OK")

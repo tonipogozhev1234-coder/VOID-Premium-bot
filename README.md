@@ -20,10 +20,13 @@ Telegram-бот для [VOID](https://webvoid.ru): Premium за Stars, коды 
 
 | Ключ | Значение |
 |------|----------|
-| `BOT_API_SECRET` | тот же секрет, что в `api/config.php` на сайте |
-| `ADMIN_ID` | ваш Telegram ID (число) |
+| `BOT_API_SECRET` | `1nmdTN92nQpyhn9p28wU_oTl1rvBiqUgtSDUWyI8GOr3A9YMeKbfrA` (= `api/secrets.local.php` на сайте) |
+| `ADMIN_ID` | `5325601154` (ваш Telegram ID) |
 | `SITE_API_URL` | `https://webvoid.ru/api` |
 | `DATA_FILE` | `/app/data/vip_data.json` |
+
+**Важно:** если в логах `HTML вместо API` — на reg.ru не залита папка `api/`.  
+Если `Сайт API OK: botAuth=True` — бот и сайт связаны.
 
 4. **Дополнительные настройки:**
    - можно **не** включать «свой Dockerfile» — Bothost сам подхватит Python + `requirements.txt`

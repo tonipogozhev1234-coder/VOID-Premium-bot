@@ -350,7 +350,7 @@ async def manage_on_site(action: str, code: str = "", telegram_id: int = 0, days
 
 
 async def regenerate_code_on_site(user_id: int, old_code: str, new_code: str, username: str = "") -> dict:
-    """Атомарно меняет код на сайте. Если action regenerate нет — fallback register+revoke."""
+    """Меняет код на сайте (статус/срок/активация сохраняются)."""
     try:
         return await site_api(
             "regenerate",
@@ -361,15 +361,16 @@ async def regenerate_code_on_site(user_id: int, old_code: str, new_code: str, us
         )
     except RuntimeError as err:
         err_text = str(err).lower()
-        # Старый API без regenerate — делаем вручную
+        # Старый API без regenerate — register + revoke (хуже: статус может сброситься)
         if "неизвестн" in err_text or "unknown" in err_text:
+            logger.warning("API без regenerate — fallback register+revoke")
             await register_code_on_site(user_id, new_code, username)
             if old_code:
                 try:
                     await manage_on_site("revoke", code=old_code)
                 except RuntimeError as rev_err:
                     logger.warning("Не удалось отозвать старый код %s: %s", old_code, rev_err)
-            return {"ok": True, "code": new_code, "status": "pending"}
+            return {"ok": True, "code": new_code, "status": "pending", "fallback": True}
         raise
 
 
@@ -571,9 +572,9 @@ async def cmd_mycode(message: types.Message):
     )
 
 
-@dp.message(Command("newcode", "regenerate"))
+@dp.message(Command("newcode", "regenerate", "resetcode", "перекод"))
 async def cmd_newcode(message: types.Message):
-    """Перегенерировать 16-символьный код (старый перестаёт работать)."""
+    """Перегенерировать 16-символьный код (старый перестаёт работать на сайте)."""
     user_id = message.from_user.id
     username = message.from_user.username or ""
     data = vip_users.get(user_id)
@@ -582,45 +583,69 @@ async def cmd_newcode(message: types.Message):
         await message.answer("❌ У вас нет кода\nКупить: /buy")
         return
     if data.get("frozen"):
-        await message.answer("🧊 Подписка заморожена. Сначала разморозьте её.")
+        await message.answer("🧊 Подписка заморожена. Сначала разморозьте: /unfreeze")
         return
     if data["expiry"] <= datetime.now():
         await message.answer("⌛ Подписка истекла. Купите заново: /buy")
         return
 
+    # Анти-спам: не чаще 1 раза в 60 сек
+    now_ts = datetime.now().timestamp()
+    last = float(data.get("last_regenerate_at") or 0)
+    if last and (now_ts - last) < 60:
+        wait = int(60 - (now_ts - last))
+        await message.answer(f"⏳ Подожди {wait} сек. перед следующей перегенерацией.")
+        return
+
     old_code = data["code"]
-    # Старый код освобождаем из used_codes, чтобы алфавит не засорялся
     used_codes.discard(old_code)
     new_code = generate_unique_code()
 
+    wait_msg = await message.answer("🔄 Генерирую новый код…")
+
     try:
-        await regenerate_code_on_site(user_id, old_code, new_code, username)
+        result = await regenerate_code_on_site(user_id, old_code, new_code, username)
+        # сайт мог вернуть канонический code
+        if isinstance(result, dict) and result.get("code"):
+            new_code = str(result["code"]).upper()
     except RuntimeError as err:
-        # Вернём старый код в used_codes, откатим new
         used_codes.discard(new_code)
         used_codes.add(old_code)
-        await message.answer(
-            f"❌ Не удалось перегенерировать код на сайте:\n{err}\n\n"
-            f"Старый код всё ещё: <code>{old_code}</code>",
-            parse_mode="HTML",
-        )
+        try:
+            await wait_msg.edit_text(
+                f"❌ Не удалось перегенерировать код на сайте:\n{err}\n\n"
+                f"Старый код всё ещё: <code>{old_code}</code>\n"
+                f"Попробуй позже или /mycode",
+                parse_mode="HTML",
+            )
+        except Exception:
+            await message.answer(
+                f"❌ Не удалось перегенерировать:\n{err}\n"
+                f"Старый: <code>{old_code}</code>",
+                parse_mode="HTML",
+            )
         return
 
     data["code"] = new_code
     data["username"] = username
+    data["last_regenerate_at"] = now_ts
     save_data()
 
-    await message.answer(
+    text = (
         f"🔄 <b>КОД ОБНОВЛЁН</b>\n\n"
-        f"❌ Старый код больше не действует\n"
+        f"❌ Старый <code>{old_code}</code> больше не действует\n"
         f"✅ Новый: <code>{new_code}</code>\n\n"
         f"📅 До: {format_expiry(data['expiry'])}\n\n"
-        f"Введите новый код на сайте:\n"
-        f"<b>Настройки → VOID Premium</b>",
-        parse_mode="HTML",
+        f"👉 Введи <b>новый</b> код на сайте:\n"
+        f"<b>Настройки → VOID Premium → Активировать</b>\n\n"
+        f"Команды: /mycode | /newcode | /vip"
     )
+    try:
+        await wait_msg.edit_text(text, parse_mode="HTML")
+    except Exception:
+        await message.answer(text, parse_mode="HTML")
 
-    if user_id != ADMIN_ID:
+    if ADMIN_ID and user_id != ADMIN_ID:
         try:
             await bot.send_message(
                 ADMIN_ID,
@@ -1059,7 +1084,10 @@ async def any_message(message: types.Message):
         code = vip_users[user_id]["code"]
         await message.answer(
             f"👑 <b>VIP</b> | Код: <code>{code}</code>\n\n"
-            f"Команды: /vip | /mycode | /help",
+            f"Команды:\n"
+            f"/mycode — показать код\n"
+            f"/newcode — <b>перегенерировать</b> код\n"
+            f"/vip | /help",
             parse_mode="HTML",
         )
     else:

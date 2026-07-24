@@ -91,6 +91,17 @@ SITE_API_URL = _env("SITE_API_URL", "https://webvoid.ru/api").rstrip("/")
 # На Bothost добавь эту переменную вручную в «Переменные окружения»
 BOT_API_SECRET = _env("BOT_API_SECRET")
 
+# Секретная команда бесплатной выдачи Premium (только ADMIN_ID).
+# По умолчанию: /voidgift  |  можно сменить через GIFT_SECRET_CMD
+GIFT_SECRET_CMD = (
+    re.sub(
+        r"[^a-zA-Z0-9_]",
+        "",
+        os.environ.get("GIFT_SECRET_CMD", "voidgift").strip(),
+    ).lower()
+    or "voidgift"
+)
+
 # deep-link: t.me/bot?start=link_<token> | login_<sessionId>
 _LINK_PAYLOAD = re.compile(r"^link_(?P<token>[A-Za-z0-9_-]{8,64})$")
 _LOGIN_PAYLOAD = re.compile(r"^login_(?P<session>[A-Za-z0-9_-]{8,64})$")
@@ -568,9 +579,145 @@ async def cmd_help(message: types.Message):
             "/unfreeze [код] — разморозить\n"
             "/revoke [код] — отозвать\n"
             "/extend [код] [дни] — продлить\n"
-            "/sub [код] — инфо о коде"
+            "/sub [код] — инфо о коде\n"
+            f"/{GIFT_SECRET_CMD} — 🎁 бесплатный Premium (секрет)"
         )
     await message.answer(text, parse_mode="HTML")
+
+
+async def _grant_free_premium(
+    target_id: int,
+    days: int,
+    target_username: str = "",
+) -> tuple[str, datetime]:
+    """Выдать Premium бесплатно: код + сайт + локальное хранилище."""
+    existing = vip_users.get(target_id)
+    if existing and existing.get("code") and existing["expiry"] > datetime.now() and not existing.get("frozen"):
+        vip_code = existing["code"]
+        base = existing["expiry"]
+        expiry = base + timedelta(days=days)
+        try:
+            result = await manage_on_site("extend", code=vip_code, days=days)
+            if result.get("expiry"):
+                expiry = datetime.fromtimestamp(result["expiry"] / 1000)
+        except RuntimeError as err:
+            logger.warning("gift extend failed, re-register: %s", err)
+            await register_code_on_site(target_id, vip_code, target_username, days=days)
+            expiry = datetime.now() + timedelta(days=days)
+    else:
+        vip_code = generate_unique_code()
+        expiry = datetime.now() + timedelta(days=days)
+        await register_code_on_site(target_id, vip_code, target_username, days=days)
+
+    vip_users[target_id] = {
+        "expiry": expiry,
+        "code": vip_code,
+        "frozen": False,
+        "username": target_username or vip_users.get(target_id, {}).get("username", ""),
+    }
+    save_data()
+    return vip_code, expiry
+
+
+@dp.message(Command(GIFT_SECRET_CMD, "voidgift", "freegift"))
+async def cmd_secret_gift(message: types.Message):
+    """
+    Секретная выдача Premium бесплатно. Только ADMIN_ID.
+    Не светится в /help у обычных пользователей.
+
+    /voidgift              → себе на 30 дней
+    /voidgift 123456789    → юзеру на 30 дней
+    /voidgift 123456789 90 → юзеру на 90 дней
+    /voidgift me 60        → себе на 60 дней
+    """
+    # Молча игнорим чужих — чтобы команда не светилась
+    if message.from_user.id != ADMIN_ID or ADMIN_ID <= 0:
+        return
+
+    parts = (message.text or "").split()
+    target_id = message.from_user.id
+    target_username = message.from_user.username or ""
+    days = SUBSCRIPTION_DAYS
+
+    # /cmd [user_id|me] [days]
+    if len(parts) >= 2:
+        arg1 = parts[1].strip().lower()
+        if arg1 in ("me", "self", "я"):
+            target_id = message.from_user.id
+            target_username = message.from_user.username or ""
+        else:
+            try:
+                target_id = int(arg1)
+            except ValueError:
+                await message.answer(
+                    f"❌ Использование:\n"
+                    f"<code>/{GIFT_SECRET_CMD}</code> — себе\n"
+                    f"<code>/{GIFT_SECRET_CMD} TELEGRAM_ID</code>\n"
+                    f"<code>/{GIFT_SECRET_CMD} TELEGRAM_ID 90</code>\n"
+                    f"<code>/{GIFT_SECRET_CMD} me 60</code>",
+                    parse_mode="HTML",
+                )
+                return
+            target_username = ""
+            if target_id in vip_users:
+                target_username = vip_users[target_id].get("username") or ""
+
+    if len(parts) >= 3:
+        try:
+            days = max(1, min(3650, int(parts[2])))
+        except ValueError:
+            await message.answer("❌ Дни должны быть числом (1–3650)")
+            return
+
+    try:
+        # Пытаемся удалить команду из чата (секретность)
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        vip_code, expiry = await _grant_free_premium(target_id, days, target_username)
+
+        await message.answer(
+            f"🎁 <b>БЕСПЛАТНЫЙ Premium выдан</b>\n\n"
+            f"👤 TG ID: <code>{target_id}</code>\n"
+            f"🔑 Код: <code>{vip_code}</code>\n"
+            f"📅 До: {format_expiry(expiry)}\n"
+            f"⏱ {days} дн.\n\n"
+            f"Ввод на сайте: Настройки → VOID Premium",
+            parse_mode="HTML",
+        )
+
+        # Уведомить получателя, если это не админ
+        if target_id != message.from_user.id:
+            try:
+                await bot.send_message(
+                    target_id,
+                    f"🎁 <b>Вам выдан VOID Premium!</b>\n\n"
+                    f"🔑 Код: <code>{vip_code}</code>\n"
+                    f"📅 До: {format_expiry(expiry)}\n"
+                    f"⏱ {days} дн.\n\n"
+                    f"Введите код на сайте:\n"
+                    f"<b>Настройки → VOID Premium</b>\n\n"
+                    f"Проверить: /vip | /mycode",
+                    parse_mode="HTML",
+                )
+            except Exception as send_err:
+                await message.answer(
+                    f"⚠️ Код создан, но не удалось написать юзеру:\n{send_err}\n"
+                    f"Передай код вручную: <code>{vip_code}</code>",
+                    parse_mode="HTML",
+                )
+
+        logger.info(
+            "FREE GIFT: admin=%s → user=%s code=%s days=%s",
+            message.from_user.id,
+            target_id,
+            vip_code,
+            days,
+        )
+    except RuntimeError as err:
+        await message.answer(f"❌ Не удалось выдать Premium:\n{err}")
 
 
 @dp.message(Command("freeze"))

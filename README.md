@@ -1,20 +1,47 @@
 # VOID Premium Telegram Bot
 
-Telegram-бот для [VOID](https://webvoid.ru): Premium-подписка за Stars, коды доступа к сайту, вход через Telegram и синхронизация с API сайта.
+Telegram-бот для [VOID](https://webvoid.ru): Premium за Stars, коды доступа, вход через Telegram.
 
-## Возможности
+## Bothost.ru (рекомендуется)
 
-- Продажа Premium за Telegram Stars (`/buy`)
-- 16-символьные коды для активации на сайте
-- Привязка Telegram к аккаунту VOID (`/start link_…`)
-- Вход на сайт через 6-значный код (`/start login_…`)
-- Админ-команды: заморозка, продление, отзыв подписок
+Репозиторий **должен быть публичным**, иначе Bothost не сможет его клонировать.
 
-## Быстрый старт
+### Создание бота
+
+1. Откройте [bothost.ru/create-bot.php](https://bothost.ru/create-bot.php)
+2. Заполните:
+   - **Платформа:** Telegram  
+   - **Библиотека:** aiogram  
+   - **Bot Token:** токен от [@BotFather](https://t.me/BotFather)  
+   - **Git URL:** `https://github.com/tonipogozhev1234-coder/VOID-Premium-bot`  
+   - **Ветка:** `main`  
+   - **Главный файл:** `bot.py` (или оставьте пустым — сработает `main.py`)
+3. **Переменные окружения** (кроме `BOT_TOKEN` — его Bothost ставит сам):
+
+| Ключ | Значение |
+|------|----------|
+| `BOT_API_SECRET` | тот же секрет, что в `api/config.php` на сайте |
+| `ADMIN_ID` | ваш Telegram ID (число) |
+| `SITE_API_URL` | `https://webvoid.ru/api` |
+| `DATA_FILE` | `/app/data/vip_data.json` |
+
+4. **Дополнительные настройки:**
+   - можно **не** включать «свой Dockerfile» — Bothost сам подхватит Python + `requirements.txt`
+   - если включаете Dockerfile — он уже есть в корне
+5. Создайте бота и смотрите **логи runtime**
+6. **Остановите локальный бот** на ПК (иначе `Conflict: terminated by other getUpdates request`)
+
+### Если Git «не клонируется»
+
+- Репозиторий приватный → Bothost получит 404. Сделайте его **Public** на GitHub:  
+  Settings → General → Danger Zone → Change repository visibility → Public  
+- Или используйте публичный URL из этого README.
+
+## Локальный запуск
 
 ```bash
 cp .env.example .env
-# заполни BOT_TOKEN, BOT_API_SECRET, ADMIN_ID
+# BOT_TOKEN, BOT_API_SECRET, ADMIN_ID
 
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
@@ -22,59 +49,27 @@ pip install -r requirements.txt
 python bot.py
 ```
 
-Или на Linux: `./start.sh`
-
 ## Переменные окружения
 
 | Переменная | Описание |
 |------------|----------|
-| `BOT_TOKEN` | Токен от [@BotFather](https://t.me/BotFather) |
-| `BOT_API_SECRET` | Общий секрет с `api/config.php` на сайте |
-| `ADMIN_ID` | Telegram ID администратора |
-| `SITE_API_URL` | URL API сайта (по умолчанию `https://webvoid.ru/api`) |
-| `VIP_PRICE_STARS` | Цена Premium в Stars (по умолчанию 100) |
+| `BOT_TOKEN` | Токен от BotFather (Bothost: `TELEGRAM_BOT_TOKEN` / `API_TOKEN` тоже ок) |
+| `BOT_API_SECRET` | Секрет с сайта (`api/config.php`) — **обязателен** |
+| `ADMIN_ID` | Telegram ID админа |
+| `SITE_API_URL` | По умолчанию `https://webvoid.ru/api` |
+| `VIP_PRICE_STARS` | Цена Premium в Stars (100) |
+| `DATA_FILE` | Путь к JSON с VIP-кодами |
 
-Полный список — в [.env.example](.env.example).
+## Структура (то, что нужно Bothost)
 
-## Деплой на VPS
-
-```bash
-sudo bash deploy/install-vps.sh
 ```
-
-Скрипт установит systemd-сервис `void-bot` в `/opt/void-bot`.
-
-## Docker
-
-```bash
-cp .env.example .env
-docker compose up -d --build
+├── bot.py              # основной код
+├── main.py             # точка входа (автодетект Bothost)
+├── requirements.txt    # aiogram, aiohttp
+├── Dockerfile          # опционально
+├── .env.example
+└── README.md
 ```
-
-## Деплой на Bothost.ru
-
-1. Репозиторий должен быть на GitHub (публичный или с доступом Bothost):
-   `https://github.com/tonipogozhev1234-coder/VOID-Premium-tg-bot`
-2. Откройте [bothost.ru/create-bot.php](https://bothost.ru/create-bot.php):
-   - **Платформа:** Telegram
-   - **Библиотека:** aiogram
-   - **Git URL:** ссылка на репозиторий выше
-   - **Ветка:** `main`
-   - **Главный файл:** `bot.py`
-3. В **Переменные окружения** добавьте (кроме BOT_TOKEN из формы):
-
-| Ключ | Значение |
-|------|----------|
-| `BOT_API_SECRET` | тот же секрет, что в `api/config.php` на сайте |
-| `ADMIN_ID` | ваш Telegram ID |
-| `SITE_API_URL` | `https://webvoid.ru/api` |
-| `DATA_FILE` | `/app/data/vip_data.json` |
-
-4. **Дополнительные настройки:** включите «Использовать собственный Dockerfile» (в репозитории уже есть `Dockerfile`).
-5. Нажмите «Создать бота» и смотрите логи в панели.
-6. **Остановите локальный бот** на ПК — иначе будет ошибка `Conflict: terminated by other getUpdates request`.
-
-Если бот падает сразу при старте — в логах часто «Не задана переменная BOT_API_SECRET»: добавьте её в переменные окружения Bothost.
 
 ## Команды бота
 
@@ -82,9 +77,9 @@ docker compose up -d --build
 |---------|----------|
 | `/start` | Приветствие и статус |
 | `/buy` | Купить Premium |
-| `/vip` | Статус подписки |
+| `/vip` | Статус |
 | `/mycode` | Показать код |
-| `/newcode` | Перегенерировать код |
+| `/newcode` | Новый код |
 | `/help` | Справка |
 
-**Не коммитьте `.env`** — в нём секреты.
+**Не коммитьте `.env`** — только переменные окружения на Bothost.

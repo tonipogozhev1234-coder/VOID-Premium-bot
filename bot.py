@@ -66,7 +66,19 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-BOT_TOKEN = _env("BOT_TOKEN")
+# Bothost / хостинги: BOT_TOKEN, TELEGRAM_BOT_TOKEN или API_TOKEN
+def _resolve_bot_token() -> str:
+    for name in ("BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "API_TOKEN"):
+        val = os.environ.get(name, "").strip()
+        if val:
+            return val
+    raise SystemExit(
+        "Не задан токен бота. Укажи BOT_TOKEN (Bothost подставляет его из формы) "
+        "или TELEGRAM_BOT_TOKEN / API_TOKEN."
+    )
+
+
+BOT_TOKEN = _resolve_bot_token()
 ADMIN_ID = _env_int("ADMIN_ID", 0)
 VIP_PRICE_STARS = _env_int("VIP_PRICE_STARS", 100)
 CODE_LENGTH = _env_int("CODE_LENGTH", 16)
@@ -76,6 +88,7 @@ OUTBOX_POLL_SEC = max(1, _env_int("OUTBOX_POLL_SEC", 2))
 # URL API сайта (без слэша в конце). Пример: https://webvoid.ru/api
 SITE_API_URL = _env("SITE_API_URL", "https://webvoid.ru/api").rstrip("/")
 # Пароль бот→сайт. НЕ токен Telegram! = BOT_API_SECRET в api/config.php
+# На Bothost добавь эту переменную вручную в «Переменные окружения»
 BOT_API_SECRET = _env("BOT_API_SECRET")
 
 # deep-link: t.me/bot?start=link_<token> | login_<sessionId>

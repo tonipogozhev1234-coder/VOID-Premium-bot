@@ -10,7 +10,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py .
-RUN mkdir -p /app/data
+COPY bot.py main.py ./
+RUN mkdir -p /app/data && chmod 777 /app/data
 
+# Long-running polling process
 CMD ["python", "bot.py"]
